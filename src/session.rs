@@ -92,75 +92,15 @@ pub fn expect(reader: &mut impl BufRead, wanted: u16, step: &str) -> Result<()> 
     })
 }
 
-/// Read a DATA payload, undoing the dot-stuffing that protects a leading period.
+/// Read a DATA payload: the dot-stuffed block up to its terminator, bytes as
+/// the sender wrote them (`transport::stuffed`, since 2026-09-10).
 ///
 /// # Errors
 ///
 /// Where the connection closed inside DATA, or the message exceeded
 /// [`MAX_BODY`].
 pub fn read_data(reader: &mut impl BufRead) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-
-    loop {
-        let mut raw = Vec::new();
-        let read = reader
-            .read_until(b'\n', &mut raw)
-            .map_err(|e| classify("reading the message data", &e))?;
-
-        if read == 0 {
-            return Err(protocol_error("a connection that closed inside DATA"));
-        }
-
-        let line = trim_eol(&raw);
-
-        if line == b"." {
-            return Ok(bytes);
-        }
-
-        let line = unstuff(line);
-
-        if bytes.len() + line.len() > MAX_BODY {
-            return Err(protocol_error("a message over the size Xmip will read"));
-        }
-
-        if !bytes.is_empty() {
-            bytes.extend_from_slice(b"\r\n");
-        }
-
-        bytes.extend_from_slice(line);
-    }
-}
-
-/// A line the sender stuffed with a leading period, unstuffed.
-const fn unstuff(line: &[u8]) -> &[u8] {
-    if line.len() >= 2 && line[0] == b'.' && line[1] == b'.' {
-        line.split_at(1).1
-    } else {
-        line
-    }
-}
-
-/// Write one line of a message body, stuffing a leading period.
-///
-/// A line that starts with a period would otherwise end the message early.
-///
-/// # Errors
-///
-/// Where the connection could not be written to.
-pub fn write_stuffed(stream: &mut impl Write, line: &[u8]) -> Result<()> {
-    if line.starts_with(b".") {
-        stream
-            .write_all(b".")
-            .map_err(|e| classify("writing the message data", &e))?;
-    }
-
-    stream
-        .write_all(line)
-        .map_err(|e| classify("writing the message data", &e))?;
-
-    stream
-        .write_all(b"\r\n")
-        .map_err(|e| classify("writing the message data", &e))
+    transport::stuffed::read_stuffed(reader, MAX_BODY)
 }
 
 #[cfg(test)]
@@ -207,25 +147,5 @@ mod tests {
         let data = read_data(&mut &b"one\r\ntwo\r\n.\r\n"[..]).expect("read");
 
         assert_eq!(data, b"one\r\ntwo");
-    }
-
-    #[test]
-    fn a_stuffed_period_survives_the_round_trip() {
-        let mut written = Vec::new();
-        write_stuffed(&mut written, b".hidden").expect("written");
-
-        assert_eq!(written, b"..hidden\r\n");
-        assert_eq!(
-            read_data(&mut &b"..hidden\r\n.\r\n"[..]).expect("read"),
-            b".hidden"
-        );
-    }
-
-    #[test]
-    fn an_ordinary_line_is_not_stuffed() {
-        let mut written = Vec::new();
-        write_stuffed(&mut written, b"Subject: one").expect("written");
-
-        assert_eq!(written, b"Subject: one\r\n");
     }
 }

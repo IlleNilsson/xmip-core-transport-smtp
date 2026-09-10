@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use transport::error::{Result, classify, protocol_error};
 use transport::wire::with_default_port;
 
-use super::session::{expect, read_reply, say, write_stuffed};
+use super::session::{expect, read_reply, say};
 
 /// One mailbox to deliver to.
 ///
@@ -83,18 +83,16 @@ fn envelope(
     expect(reader, 354, "DATA")
 }
 
-/// The message itself, one line at a time, periods stuffed.
+/// The message itself as one dot-stuffed block, bytes as they are, the
+/// terminator after (`transport::stuffed`, since 2026-09-10).
 fn body(stream: &mut impl Write, bytes: &[u8]) -> Result<()> {
-    for line in bytes.split(|byte| *byte == b'\n') {
-        write_stuffed(stream, line.strip_suffix(b"\r").unwrap_or(line))?;
-    }
-
-    Ok(())
+    stream
+        .write_all(&transport::stuffed::stuff(bytes))
+        .map_err(|e| classify("writing the message data", &e))
 }
 
-/// End the data, wait for the acknowledgement, say goodbye.
+/// Wait for the acknowledgement of the data, say goodbye.
 fn finish(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<()> {
-    say(stream, ".")?;
     expect(reader, 250, "the end of data")?;
     say(stream, "QUIT")?;
 
@@ -136,11 +134,11 @@ mod tests {
     }
 
     #[test]
-    fn every_line_of_the_body_is_terminated_as_the_protocol_requires() {
+    fn the_body_is_one_block_ended_by_the_terminator() {
         let mut written = Vec::new();
         body(&mut written, b"Subject: one\r\n\r\nhello").expect("written");
 
-        assert_eq!(written, b"Subject: one\r\n\r\nhello\r\n");
+        assert_eq!(written, b"Subject: one\r\n\r\nhello\r\n.\r\n");
     }
 
     #[test]
@@ -148,6 +146,6 @@ mod tests {
         let mut written = Vec::new();
         body(&mut written, b"one\r\n.hidden").expect("written");
 
-        assert_eq!(written, b"one\r\n..hidden\r\n");
+        assert_eq!(written, b"one\r\n..hidden\r\n.\r\n");
     }
 }
