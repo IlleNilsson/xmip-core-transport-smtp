@@ -22,6 +22,7 @@ use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
+use transport::loopback::{FarEnd, Loopback};
 use transport::socket;
 
 pub struct SmtpTransport {
@@ -90,28 +91,80 @@ impl Transport for SmtpTransport {
     }
 }
 
+impl SmtpTransport {
+    /// Both ends on this machine: a receiver on an ephemeral local port, and
+    /// a sender relaying one message through it. The session has no timeout
+    /// to set: it ends when the sender says QUIT or hangs up.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::receiving("127.0.0.1:0")
+    }
+}
+
+/// A bound receiver waiting for its one session.
+struct Listening {
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        server::accept_one(&self.listener)
+    }
+}
+
+impl Loopback for SmtpTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening { listener, address }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        Self::sending(address, "xmip@example.com").send("mailto:pingpong@example.com", payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The shapes a transport is most likely to change: nothing, one byte,
+    /// every byte value, a run of NULs, high bytes, and line endings alone.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
     #[test]
     fn smtp_round_trip_survives_a_leading_period() {
-        let receiver = SmtpTransport::receiving("127.0.0.1:0");
-        let (listener, address) = receiver.bind().expect("binding");
-
-        let sender = std::thread::spawn(move || {
-            // The third line starts with a period, which is the one byte
-            // sequence that can end a message early if it is not stuffed.
-            SmtpTransport::sending(address, "xmip@example.com")
-                .send("mailto:orders@example.com", b"Subject: one\r\n\r\n.hidden")
-                .expect("sending");
-        });
-
-        let arrived = receiver.accept_one(&listener).expect("accepting");
-        sender.join().expect("the sending thread panicked");
+        // The third line starts with a period, which is the one byte sequence
+        // that can end a message early if it is not stuffed.
+        let arrived = SmtpTransport::loopback()
+            .round(b"Subject: one\r\n\r\n.hidden")
+            .expect("round");
 
         assert_eq!(arrived.bytes, b"Subject: one\r\n\r\n.hidden");
         assert!(arrived.origin_uri.starts_with("smtp://127.0.0.1:"));
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole() {
+        let smtp = SmtpTransport::loopback();
+        assert!(smtp.ceiling().is_none());
+        for (name, bytes) in edge_payloads() {
+            assert!(smtp.refuses(&bytes).is_none(), "{name}");
+            assert_eq!(smtp.round(&bytes).expect(name).bytes, bytes, "{name}");
+        }
     }
 
     #[test]
