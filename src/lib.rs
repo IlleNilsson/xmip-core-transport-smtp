@@ -22,6 +22,7 @@ use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
+use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, Loopback};
 use transport::socket;
 
@@ -101,26 +102,20 @@ impl SmtpTransport {
     }
 }
 
-/// A bound receiver waiting for its one session.
-struct Listening {
-    listener: TcpListener,
-    address: String,
-}
+/// What the far end does with its one session: the receiver reads nothing
+/// of the instance, so the unit stands in for it.
+struct Receiving;
 
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        server::accept_one(&self.listener)
+impl Accepting for Receiving {
+    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+        server::accept_one(listener)
     }
 }
 
 impl Loopback for SmtpTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening { listener, address }))
+        Ok(Box::new(Listening::new(Receiving, listener, address)))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
@@ -131,19 +126,7 @@ impl Loopback for SmtpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The shapes a transport is most likely to change: nothing, one byte,
-    /// every byte value, a run of NULs, high bytes, and line endings alone.
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
-    }
+    use transport::payload::edge_payloads;
 
     #[test]
     fn smtp_round_trip_survives_a_leading_period() {
