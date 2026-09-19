@@ -119,7 +119,7 @@ impl Loopback for SmtpTransport {
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
-        Self::sending(address, "xmip@example.com").send("mailto:pingpong@example.com", payload)
+        Self::sending(address, "xmip@example.com").send("mailto:round-trip@example.com", payload)
     }
 }
 
