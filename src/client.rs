@@ -1,9 +1,10 @@
 //! Relaying one message, one step at a time.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::time::Duration;
 
 use transport::error::{Result, classify, protocol_error};
+use transport::socket;
 use transport::wire::with_default_port;
 
 use super::session::{expect, read_reply, say};
@@ -37,18 +38,27 @@ impl Recipient {
     }
 }
 
-/// Relay one message through one server.
+/// Relay one message through one server, within `timeout` on the connect
+/// and on every read. `None` waits as long as the operating system does.
 ///
 /// # Errors
 ///
-/// Where the target is not a mailbox, the relay could not be reached, or any
-/// step of the exchange was refused.
-pub fn relay(relay: &str, from: &str, target: &str, bytes: &[u8]) -> Result<()> {
+/// Where the target is not a mailbox, the relay could not be reached within
+/// `timeout`, or any step of the exchange was refused.
+pub fn relay(
+    relay: &str,
+    from: &str,
+    target: &str,
+    bytes: &[u8],
+    timeout: Option<Duration>,
+) -> Result<()> {
     let recipient = Recipient::parse(target)?;
     let address = with_default_port(relay, 25);
 
-    let mut stream =
-        TcpStream::connect(&address).map_err(|e| classify("connecting to the relay", &e))?;
+    // The connect is bounded as well as the reads. This was a bare connect
+    // until 2026-09-21, which waits on the operating system's schedule, and
+    // longer still on a machine out of ephemeral ports.
+    let mut stream = socket::connect_tcp(&address, timeout)?;
 
     let mut reader = BufReader::new(
         stream

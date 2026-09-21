@@ -17,19 +17,21 @@ pub mod server;
 pub mod session;
 
 use std::net::TcpListener;
+use std::time::Duration;
 
 use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
 use transport::listening::{Accepting, Listening};
-use transport::loopback::{FarEnd, Loopback};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
 pub struct SmtpTransport {
     bind: String,
     relay: String,
     from: String,
+    timeout: Option<Duration>,
 }
 
 impl SmtpTransport {
@@ -40,6 +42,7 @@ impl SmtpTransport {
             bind: bind.into(),
             relay: String::new(),
             from: String::new(),
+            timeout: None,
         }
     }
 
@@ -50,7 +53,16 @@ impl SmtpTransport {
             bind: String::new(),
             relay: relay.into(),
             from: from.into(),
+            timeout: None,
         }
+    }
+
+    /// Give up on a connection that does not arrive, or stops sending, as
+    /// `TcpTransport` does.
+    #[must_use]
+    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     /// Bind and report the address actually assigned.
@@ -68,7 +80,7 @@ impl SmtpTransport {
     ///
     /// As [`server::accept_one`].
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::accept_one(listener)
+        server::accept_one(listener, self.timeout)
     }
 }
 
@@ -88,38 +100,45 @@ impl Transport for SmtpTransport {
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        client::relay(&self.relay, &self.from, target, bytes)
+        client::relay(&self.relay, &self.from, target, bytes, self.timeout)
     }
 }
 
 impl SmtpTransport {
     /// Both ends on this machine: a receiver on an ephemeral local port, and
-    /// a sender relaying one message through it. The session has no timeout
-    /// to set: it ends when the sender says QUIT or hangs up.
+    /// a sender relaying one message through it, the loopback timeout on
+    /// the accept, the connect and the reads. The session ends when the
+    /// sender says QUIT or hangs up; the timeout is for when it does neither.
     #[must_use]
     pub fn loopback() -> Self {
-        Self::receiving("127.0.0.1:0")
+        Self::receiving("127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
     }
 }
 
 /// What the far end does with its one session: the receiver reads nothing
-/// of the instance, so the unit stands in for it.
-struct Receiving;
+/// of the instance but its timeout, so the timeout stands in for it.
+struct Receiving(Option<Duration>);
 
 impl Accepting for Receiving {
     fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::accept_one(listener)
+        server::accept_one(listener, self.0)
     }
 }
 
 impl Loopback for SmtpTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(Receiving, listener, address)))
+        Ok(Box::new(Listening::new(
+            Receiving(self.timeout),
+            listener,
+            address,
+        )))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
-        Self::sending(address, "xmip@example.com").send("mailto:round-trip@example.com", payload)
+        Self::sending(address, "xmip@example.com")
+            .timing_out_after(LOOPBACK_TIMEOUT)
+            .send("mailto:round-trip@example.com", payload)
     }
 }
 
