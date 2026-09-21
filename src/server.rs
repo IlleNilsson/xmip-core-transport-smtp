@@ -2,9 +2,11 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::time::Duration;
 
 use transport::Arrived;
 use transport::error::{Result, classify};
+use transport::socket;
 use transport::wire::trim_eol;
 
 use super::session::{read_data, say};
@@ -17,7 +19,9 @@ enum Next {
     Done,
 }
 
-/// Take one message from an already-bound listener.
+/// Take one message from an already-bound listener, within `timeout` and
+/// with `timeout` on its reads. `None` waits forever, which is what a
+/// listening Receive Location does.
 ///
 /// `MAIL FROM` is a *passed* identity and belongs at the identification gate, so
 /// this answers it and keeps nothing. [`Arrived`] carries where the bytes came
@@ -25,11 +29,13 @@ enum Next {
 ///
 /// # Errors
 ///
-/// Where the connection failed, or a command could not be answered.
-pub fn accept_one(listener: &TcpListener) -> Result<Arrived> {
-    let (mut stream, peer) = listener
-        .accept()
-        .map_err(|e| classify("accepting a connection", &e))?;
+/// Where nothing connected within `timeout`, the connection failed, or a
+/// command could not be answered.
+pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
+    // The wait for the connection is bounded as well as the reads. This did
+    // a bare accept until 2026-09-21, so a far end whose near end never
+    // connected waited for good, and a hang has no verdict.
+    let (mut stream, peer) = socket::accept_tcp(listener, timeout)?;
 
     let mut reader = BufReader::new(
         stream
