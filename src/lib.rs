@@ -23,7 +23,7 @@ use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
-use transport::listening::{Accepting, Listening};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
@@ -115,23 +115,14 @@ impl SmtpTransport {
     }
 }
 
-/// What the far end does with its one session: the receiver reads nothing
-/// of the instance but its timeout, so the timeout stands in for it.
-struct Receiving(Option<Duration>);
-
-impl Accepting for Receiving {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::accept_one(listener, self.0)
-    }
-}
-
 impl Loopback for SmtpTransport {
+    /// The far end's one session: the receiver reads nothing of the
+    /// instance but its timeout, so the timeout stands in for it.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
+        let timeout = self.timeout;
         Ok(Box::new(Listening::new(
-            Receiving(self.timeout),
-            listener,
-            address,
+            move |listener: &TcpListener| server::accept_one(listener, timeout),
+            self.bind()?,
         )))
     }
 
