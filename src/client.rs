@@ -3,9 +3,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
+use net::authority::with_default_port;
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
-use transport::wire::with_default_port;
 
 use super::session::{expect, read_reply, say};
 

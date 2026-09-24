@@ -20,6 +20,8 @@ path = "src/lib.rs"
 # otherwise, which is what lets this build on every target in
 # deployment-model.md without a cross-compilation story.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# An authority read as a URI writes it: the host, and the default port.
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
 
 [dev-dependencies]
 # The loopback payloads the tests drive, from the capability's test
