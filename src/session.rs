@@ -5,8 +5,9 @@
 
 use std::io::{BufRead, Write};
 
+use net::head::trim_eol;
 use transport::error::{Result, TransportError, classify, protocol_error};
-use transport::wire::{MAX_BODY, trim_eol};
+use transport::wire::MAX_BODY;
 
 /// Write one command or reply, terminated as the protocol requires.
 ///

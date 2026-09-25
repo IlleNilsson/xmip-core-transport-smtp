@@ -4,10 +4,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
+use net::head::trim_eol;
 use transport::Arrived;
 use transport::error::{Result, classify};
 use transport::socket;
-use transport::wire::trim_eol;
 
 use super::session::{read_data, say};
 
