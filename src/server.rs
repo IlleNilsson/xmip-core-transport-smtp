@@ -4,7 +4,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-use net::head::trim_eol;
 use transport::Arrived;
 use transport::error::{Result, classify};
 use transport::socket;
@@ -68,17 +67,9 @@ fn converse(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Vec<u8
 
 /// The next command's verb, or `None` where the client hung up.
 fn next_verb(reader: &mut impl BufRead) -> Result<Option<String>> {
-    let mut raw = String::new();
-
-    let read = reader
-        .read_line(&mut raw)
-        .map_err(|e| classify("reading a command", &e))?;
-
-    if read == 0 {
+    let Some(command) = net::read::line(reader)? else {
         return Ok(None);
-    }
-
-    let command = String::from_utf8_lossy(trim_eol(raw.as_bytes())).to_string();
+    };
 
     Ok(Some(
         command

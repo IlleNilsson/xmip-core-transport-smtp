@@ -5,9 +5,8 @@
 
 use std::io::{BufRead, Write};
 
-use net::head::trim_eol;
+use net::{MAX_BODY, read, reply};
 use transport::error::{Result, TransportError, classify, protocol_error};
-use transport::wire::MAX_BODY;
 
 /// Write one command or reply, terminated as the protocol requires.
 ///
@@ -35,14 +34,15 @@ pub fn say(stream: &mut impl Write, line: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Where the connection closed mid-reply, or a line carried no reply code.
+/// Where the connection closed mid-reply, or a line carried no reply code
+/// (`net::reply::code`).
 pub fn read_reply(reader: &mut impl BufRead) -> Result<(u16, String)> {
     let mut text = String::new();
 
     loop {
-        let line = read_line(reader)?;
-        let code = reply_code(&line)?;
-        let continued = line.as_bytes().get(3) == Some(&b'-');
+        let line = read::line(reader)?
+            .ok_or_else(|| protocol_error("a connection that closed mid-reply"))?;
+        let (code, continued) = reply::code(&line)?;
 
         text.push_str(&line);
 
@@ -52,26 +52,6 @@ pub fn read_reply(reader: &mut impl BufRead) -> Result<(u16, String)> {
 
         text.push('\n');
     }
-}
-
-fn read_line(reader: &mut impl BufRead) -> Result<String> {
-    let mut raw = String::new();
-
-    let read = reader
-        .read_line(&mut raw)
-        .map_err(|e| classify("reading a reply", &e))?;
-
-    if read == 0 {
-        return Err(protocol_error("a connection that closed mid-reply"));
-    }
-
-    Ok(String::from_utf8_lossy(trim_eol(raw.as_bytes())).to_string())
-}
-
-fn reply_code(line: &str) -> Result<u16> {
-    line.get(..3)
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| protocol_error(format!("a reply with no code: {line}")))
 }
 
 /// Read one reply and insist on a particular code.

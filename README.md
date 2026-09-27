@@ -10,6 +10,9 @@ the trait, the error vocabulary and the shared wire helpers; nothing in it names
 a protocol. The head a line-oriented protocol reads — lines, then a blank
 line — left it on 2026-09-25 for `net::head` in
 [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net).
+Each command and reply line is read there too (`net::read::line`, under its
+ceiling, refused where it is not UTF-8), and a reply's code (`net::reply`);
+until 2026-09-27 this crate read both itself, the code without its range.
 
 ## Toolchain
 
