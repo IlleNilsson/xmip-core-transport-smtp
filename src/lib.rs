@@ -20,12 +20,14 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use transport::Arrived;
+use transport::Configured;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 pub struct SmtpTransport {
     bind: String,
@@ -104,6 +106,45 @@ impl Transport for SmtpTransport {
     }
 }
 
+impl Configured for SmtpTransport {
+    /// The address is where a Receive Location listens, and the relay a Send
+    /// Location hands its mail to; a send's target is the recipient's
+    /// mailbox.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "from",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The mailbox a Send Location's mail is from.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a connection is waited for, and how long one that stops \
+                          sending is waited on; unbounded when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    /// A Send Location is the one with a sender, which its declaration makes
+    /// required there and refuses on a Receive Location.
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let transport = match settings.optional_text("from") {
+            Some(from) => Self::sending(address, from),
+            None => Self::receiving(address),
+        };
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl SmtpTransport {
     /// Both ends on this machine: a receiver on an ephemeral local port, and
     /// a sender relaying one message through it, the loopback timeout on
@@ -137,6 +178,32 @@ impl Loopback for SmtpTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+
+    #[test]
+    fn smtp_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(SmtpTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            (
+                "from".to_string(),
+                Given::Text("xmip@example.com".to_string()),
+            ),
+            ("timeout".to_string(), Given::Text("2s".to_string())),
+        ];
+        let sending = SmtpTransport::open("relay:25", Applies::Send, &given).expect("sending");
+        assert_eq!(
+            (sending.relay.as_str(), sending.from.as_str()),
+            ("relay:25", "xmip@example.com")
+        );
+        assert_eq!(sending.timeout, Some(Duration::from_secs(2)));
+        let receiving =
+            SmtpTransport::open("0.0.0.0:25", Applies::Receive, &[]).expect("receiving");
+        assert_eq!(receiving.bind, "0.0.0.0:25");
+        let Err(refused) = SmtpTransport::open("relay:25", Applies::Send, &[]) else {
+            panic!("a Send Location's sender is required");
+        };
+        assert!(refused.message.contains("\"from\""), "{refused}");
+    }
 
     #[test]
     fn smtp_round_trip_survives_a_leading_period() {
