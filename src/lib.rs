@@ -24,6 +24,7 @@ use transport::Configured;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
+use transport::kept::Kept;
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
@@ -34,6 +35,8 @@ pub struct SmtpTransport {
     relay: String,
     from: String,
     timeout: Option<Duration>,
+    /// The listener the first receive binds, and every receive takes from.
+    receiving: Kept<TcpListener>,
 }
 
 impl SmtpTransport {
@@ -45,6 +48,7 @@ impl SmtpTransport {
             relay: String::new(),
             from: String::new(),
             timeout: None,
+            receiving: Kept::new(),
         }
     }
 
@@ -56,6 +60,7 @@ impl SmtpTransport {
             relay: relay.into(),
             from: from.into(),
             timeout: None,
+            receiving: Kept::new(),
         }
     }
 
@@ -95,10 +100,10 @@ impl Transport for SmtpTransport {
         Directions::BOTH
     }
 
+    /// One message, from the listener the first receive bound and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-
-        Ok(vec![self.accept_one(&listener)?])
+        let listener = self.receiving.bound(|| self.bind())?;
+        Ok(vec![self.accept_one(listener)?])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -203,6 +208,16 @@ mod tests {
             panic!("a Send Location's sender is required");
         };
         assert!(refused.message.contains("\"from\""), "{refused}");
+    }
+
+    #[test]
+    fn every_receive_takes_from_the_listener_the_first_bound() {
+        let receiver = SmtpTransport::loopback();
+        receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+            SmtpTransport::loopback().send_to(at, payload)
+        });
     }
 
     #[test]
