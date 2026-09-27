@@ -14,6 +14,8 @@ Each command and reply line is read there too (`net::read::line`, under its
 ceiling, refused where it is not UTF-8), and a reply's code (`net::reply`);
 until 2026-09-27 this crate read both itself, the code without its range.
 
+A Receive Location keeps its listener, bound on the first receive (`transport::kept::Kept`): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
