@@ -1,36 +1,45 @@
-//! Accepting one message. Enough of RFC 5321 and no more.
+//! Answering a client's commands, and the far end that takes one message
+//! and answers it at once. Enough of RFC 5321 and no more. A Receive
+//! Location answers the end of `DATA` only after its receive cycle
+//! ([`crate::receiving`]); this module answers everything else.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-use transport::Arrived;
 use transport::error::{Result, classify};
 use transport::socket;
+use transport::taken::Taken;
 
 use super::session::{read_data, say};
 
-/// What the command loop decided to do next.
-enum Next {
-    /// Keep reading commands.
+/// What one command came to.
+pub enum Next {
+    /// Answered: keep reading commands.
     Continue,
+    /// A message's `DATA` was read whole, and the end of it is not yet
+    /// answered.
+    Data(Vec<u8>),
     /// The client said goodbye, or hung up.
     Done,
 }
 
+/// The reply to the end of `DATA` that takes the message.
+pub const ACCEPTED: &str = "250 accepted";
+
 /// Take one message from an already-bound listener, within `timeout` and
-/// with `timeout` on its reads. `None` waits forever, which is what a
-/// listening Receive Location does.
+/// with `timeout` on its reads, answering its end at once: the loopback's far
+/// end, which holds what it took whole to compare.
 ///
 /// `MAIL FROM` is a *passed* identity and belongs at the identification gate, so
-/// this answers it and keeps nothing. [`Arrived`] carries where the bytes came
+/// this answers it and keeps nothing. [`Taken`] carries where the bytes came
 /// from, and the envelope is not that.
 ///
 /// # Errors
 ///
 /// Where nothing connected within `timeout`, the connection failed, or a
 /// command could not be answered.
-pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
+pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Taken> {
     // The wait for the connection is bounded as well as the reads. This did
     // a bare accept until 2026-09-21, so a far end whose near end never
     // connected waited for good, and a hang has no verdict.
@@ -46,22 +55,35 @@ pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<A
 
     let bytes = converse(&mut stream, &mut reader)?;
 
-    Ok(Arrived::new(format!("smtp://{peer}"), bytes))
+    Ok(Taken::new(format!("smtp://{peer}"), bytes))
 }
 
-/// Answer commands until the client leaves, and hand back what it sent.
+/// Answer commands until the client leaves, the end of each `DATA` at once,
+/// and hand back what it sent last.
 fn converse(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
 
     loop {
-        let Some(verb) = next_verb(reader)? else {
-            return Ok(bytes);
-        };
-
-        match answer(stream, reader, &verb, &mut bytes)? {
+        match command(stream, reader)? {
             Next::Continue => (),
+            Next::Data(data) => {
+                bytes = data;
+                say(stream, ACCEPTED)?;
+            }
             Next::Done => return Ok(bytes),
         }
+    }
+}
+
+/// Read one command and answer it, but for the end of a `DATA`, which is
+/// handed back unanswered.
+///
+/// # Errors
+/// Where the connection broke, or a `DATA` did not end.
+pub fn command(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Next> {
+    match next_verb(reader)? {
+        Some(verb) => answer(stream, reader, &verb),
+        None => Ok(Next::Done),
     }
 }
 
@@ -81,12 +103,7 @@ fn next_verb(reader: &mut impl BufRead) -> Result<Option<String>> {
 }
 
 /// Answer one command.
-fn answer(
-    stream: &mut impl Write,
-    reader: &mut impl BufRead,
-    verb: &str,
-    bytes: &mut Vec<u8>,
-) -> Result<Next> {
+fn answer(stream: &mut impl Write, reader: &mut impl BufRead, verb: &str) -> Result<Next> {
     match verb {
         "" => Ok(Next::Continue),
         "HELO" => say(stream, "250 xmip").map(|()| Next::Continue),
@@ -94,10 +111,7 @@ fn answer(
         "MAIL" | "RCPT" | "RSET" | "NOOP" => say(stream, "250 ok").map(|()| Next::Continue),
         "DATA" => {
             say(stream, "354 end with a line containing only a period")?;
-            *bytes = read_data(reader)?;
-            say(stream, "250 accepted")?;
-
-            Ok(Next::Continue)
+            Ok(Next::Data(read_data(reader)?))
         }
         "QUIT" => {
             // A client that hangs up without waiting for the goodbye is rude,
@@ -159,7 +173,7 @@ mod tests {
     #[test]
     fn the_envelope_is_answered_and_not_kept() {
         // ADR-0019: MAIL FROM is a passed identity for the identification gate,
-        // and Arrived carries origin rather than envelope.
+        // and the Stream carries origin rather than envelope.
         let (bytes, said) = converse_with(b"MAIL FROM:<a@example.com>\r\nQUIT\r\n");
 
         assert!(said.contains("250 ok"));

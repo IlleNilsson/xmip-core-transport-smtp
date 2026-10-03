@@ -7,12 +7,19 @@
 //! is why `send` takes a mailbox as its target and not a host.
 //!
 //! ```text
-//! session.rs  saying and hearing one line at a time
-//! server.rs   accepting one message
-//! client.rs   relaying one message
+//! session.rs    saying and hearing one line at a time
+//! server.rs     answering a client's commands
+//! receiving.rs  a Receive Location's clients, answered after the cycle
+//! client.rs     relaying one message
 //! ```
+//!
+//! **A message is taken only after the runtime's whole receive cycle.** The
+//! client waits for the reply to the end of its `DATA`: `250` on
+//! `Accepted`, `451` on `Refused` — a temporary failure, so it keeps the
+//! message and sends it again.
 
 pub mod client;
+pub mod receiving;
 pub mod server;
 pub mod session;
 
@@ -24,19 +31,22 @@ use transport::Configured;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
-use transport::kept::Kept;
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::serving::Serving;
 use transport::socket;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+
+use crate::receiving::Client;
 
 pub struct SmtpTransport {
     bind: String,
     relay: String,
     from: String,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and every receive takes from.
-    receiving: Kept<TcpListener>,
+    /// The listener the first receive binds, and the clients' connections
+    /// kept open on it between messages.
+    serving: Serving<Client>,
 }
 
 impl SmtpTransport {
@@ -48,7 +58,7 @@ impl SmtpTransport {
             relay: String::new(),
             from: String::new(),
             timeout: None,
-            receiving: Kept::new(),
+            serving: Serving::new(),
         }
     }
 
@@ -60,7 +70,7 @@ impl SmtpTransport {
             relay: relay.into(),
             from: from.into(),
             timeout: None,
-            receiving: Kept::new(),
+            serving: Serving::new(),
         }
     }
 
@@ -80,15 +90,6 @@ impl SmtpTransport {
     pub fn bind(&self) -> Result<(TcpListener, String)> {
         socket::bind_tcp(&self.bind)
     }
-
-    /// Take one message from an already-bound listener.
-    ///
-    /// # Errors
-    ///
-    /// As [`server::accept_one`].
-    pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::accept_one(listener, self.timeout)
-    }
 }
 
 impl Transport for SmtpTransport {
@@ -100,10 +101,22 @@ impl Transport for SmtpTransport {
         Directions::BOTH
     }
 
-    /// One message, from the listener the first receive bound and kept.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered(
+            "each request is its own, and a connection waiting for its answer takes no next request",
+        )
+    }
+
+    /// One message, from a new client on the listener the first receive
+    /// bound and kept, or the next from a client kept connected. Its
+    /// client waits for the reply to the end of its `DATA` until the
+    /// verdict: `250` on `Accepted`, `451` on `Refused`
+    /// ([`receiving`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let listener = self.receiving.bound(|| self.bind())?;
-        Ok(vec![self.accept_one(listener)?])
+        let arrived =
+            self.serving
+                .next(|| self.bind(), self.timeout, Client::greeted, Client::turn)?;
+        Ok(vec![arrived])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -213,11 +226,59 @@ mod tests {
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {
         let receiver = SmtpTransport::loopback();
-        receiver.receiving.bound(|| receiver.bind()).expect("bound");
-        let address = receiver.receiving.address().expect("address");
-        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+        let address = receiver
+            .serving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        transport::kept::held_across_receives(&receiver, &address, 5, |at, payload| {
             SmtpTransport::loopback().send_to(at, payload)
         });
+    }
+
+    #[test]
+    fn the_client_is_answered_250_on_accepted_451_on_failed_and_5xx_on_refused() {
+        // Short: the last receive only answers the client's QUIT, then
+        // finds nothing more.
+        let receiver =
+            SmtpTransport::receiving("127.0.0.1:0").timing_out_after(Duration::from_millis(500));
+        let address = receiver
+            .serving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        let sender = std::thread::spawn(move || {
+            let sending = SmtpTransport::sending(address, "xmip@example.com")
+                .timing_out_after(LOOPBACK_TIMEOUT);
+            let failed = sending.send("mailto:a@example.com", b"Subject: first");
+            let accepted = sending.send("mailto:a@example.com", b"Subject: again");
+            let refused = sending.send("mailto:a@example.com", b"Subject: refused");
+            (failed, accepted, refused)
+        });
+        let first = transport::arrived::one_arrival(receiver.receive().expect("received"), "one")
+            .expect("one");
+        assert!(first.defers());
+        first.failed().expect("failed");
+        let again = transport::arrived::one_arrival(receiver.receive().expect("received"), "one")
+            .expect("one")
+            .taken()
+            .expect("accepted");
+        assert_eq!(again.bytes, b"Subject: again");
+        transport::arrived::one_arrival(receiver.receive().expect("received"), "one")
+            .expect("one")
+            .refused(transport::Refusal::Unacceptable)
+            .expect("refused");
+        // The client waits for the reply to its QUIT, which the next
+        // receive answers.
+        assert!(receiver.receive().is_err(), "nothing more was sent");
+        let (failed, accepted, refused) = sender.join().expect("sender");
+        let failed = failed.expect_err("a 451");
+        assert!(failed.retryable, "a 451 is temporary: {failed}");
+        assert!(failed.message.contains("451"), "{failed}");
+        accepted.expect("a 250");
+        let refused = refused.expect_err("a 554");
+        assert!(!refused.retryable, "a 554 is permanent: {refused}");
+        assert!(refused.message.contains("554"), "{refused}");
     }
 
     #[test]
