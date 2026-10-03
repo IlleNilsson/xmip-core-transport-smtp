@@ -14,7 +14,11 @@ Each command and reply line is read there too (`net::read::line`, under its
 ceiling, refused where it is not UTF-8), and a reply's code (`net::reply`);
 until 2026-09-27 this crate read both itself, the code without its range.
 
-A Receive Location keeps its listener, bound on the first receive (`transport::kept::Kept`): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused.
+A Receive Location keeps its listener, bound on the first receive: a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused. Since 2026-10-02 a client's connection is kept too (`transport::serving::Serving`), so a client that sends several messages in one session has each taken by a receive.
+
+## Acknowledgement
+
+A message is taken only after the runtime's whole receive cycle. The client waits for the reply to the end of its `DATA`, and its connection takes no next command meanwhile: `Accepted` answers `250`. `Refused` answers a permanent reply the client does not retry, among those RFC 5321 section 4.3.2 allows after `DATA`: `550 5.7.1` (RFC 3463, delivery not authorized) for a sender not identified or not permitted, `554 5.6.0` for content refused. `Failed` answers `451` — a temporary failure, RFC 5321 section 4.2.5, so the client keeps the message and sends it again (`receiving::reply`). A message dropped without a verdict shuts the connection unanswered (`transport::answer::Answer`), which a client also retries. `DATA` is read whole, dot-unstuffed by `transport::stuffed`, so the body is whole in memory. Until 2026-10-02 the end of `DATA` was answered `250` as soon as it was read.
 
 ## Toolchain
 
