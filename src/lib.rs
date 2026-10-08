@@ -26,6 +26,8 @@ pub mod session;
 use std::net::TcpListener;
 use std::time::Duration;
 
+use context::property::{PEER_ADDRESS, SMTP_MAIL_FROM};
+use transport::ArrivalIdentity;
 use transport::Arrived;
 use transport::Configured;
 use transport::Directions;
@@ -175,6 +177,10 @@ impl SmtpTransport {
 }
 
 impl Loopback for SmtpTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Named(&[PEER_ADDRESS, SMTP_MAIL_FROM])
+    }
+
     /// The far end's one session: the receiver reads nothing of the
     /// instance but its timeout, so the timeout stands in for it.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {

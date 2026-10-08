@@ -18,6 +18,8 @@ use transport::error::{Result, classify};
 use transport::serving::{Open, Turn};
 use transport::{Acknowledgement, Arrived, Refusal, Verdict};
 
+use context::property::SMTP_MAIL_FROM;
+
 use crate::server::{self, ACCEPTED, Next};
 use crate::session::say;
 
@@ -48,6 +50,9 @@ pub struct Client {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
     peer: SocketAddr,
+    /// The reverse-path the last `MAIL FROM` named, for the message whose
+    /// `DATA` follows it.
+    from: Option<String>,
     /// A message taken and its `DATA` not yet answered.
     busy: Busy,
 }
@@ -67,6 +72,7 @@ impl Client {
             reader,
             writer: stream,
             peer,
+            from: None,
             busy: Busy::new(),
         };
         say(&mut client.writer, "220 xmip ESMTP")?;
@@ -81,6 +87,10 @@ impl Client {
     pub fn turn(&mut self) -> Result<Turn<Arrived>> {
         match server::command(&mut self.writer, &mut self.reader)? {
             Next::Continue => Ok(Turn::Nothing),
+            Next::Mail(from) => {
+                self.from = Some(from);
+                Ok(Turn::Nothing)
+            }
             Next::Done => Ok(Turn::Closed),
             Next::Data(bytes) => {
                 // Dropped unanswered, the answer shuts the connection, which
@@ -89,11 +99,13 @@ impl Client {
                 let acknowledgement = Acknowledgement::deferred(move |verdict| {
                     answer.with(|writer| say(writer, reply(verdict)))
                 });
-                Ok(Turn::Taken(Arrived::whole(
-                    format!("smtp://{}", self.peer),
-                    bytes,
-                    acknowledgement,
-                )))
+                let arrived =
+                    Arrived::whole(format!("smtp://{}", self.peer), bytes, acknowledgement)
+                        .from_peer(self.peer);
+                Ok(Turn::Taken(match self.from.take() {
+                    Some(from) => arrived.observing(SMTP_MAIL_FROM, from),
+                    None => arrived,
+                }))
             }
         }
     }

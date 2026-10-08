@@ -11,12 +11,17 @@ use transport::error::{Result, classify};
 use transport::socket;
 use transport::taken::Taken;
 
+use context::property::SMTP_MAIL_FROM;
+
 use super::session::{read_data, say};
 
 /// What one command came to.
 pub enum Next {
     /// Answered: keep reading commands.
     Continue,
+    /// `MAIL FROM` answered: the reverse-path it named, without its angle
+    /// brackets, the sender the envelope says (RFC 5321 section 4.1.1.2).
+    Mail(String),
     /// A message's `DATA` was read whole, and the end of it is not yet
     /// answered.
     Data(Vec<u8>),
@@ -31,9 +36,9 @@ pub const ACCEPTED: &str = "250 accepted";
 /// with `timeout` on its reads, answering its end at once: the loopback's far
 /// end, which holds what it took whole to compare.
 ///
-/// `MAIL FROM` is a *passed* identity and belongs at the identification gate, so
-/// this answers it and keeps nothing. [`Taken`] carries where the bytes came
-/// from, and the envelope is not that.
+/// `MAIL FROM` is a *passed* identity and belongs at the identification gate:
+/// [`Taken`] carries the reverse-path it named, as the arrival does, under
+/// `context::property::SMTP_MAIL_FROM`, and the peer.
 ///
 /// # Errors
 ///
@@ -53,24 +58,33 @@ pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<T
 
     say(&mut stream, "220 xmip ESMTP")?;
 
-    let bytes = converse(&mut stream, &mut reader)?;
+    let (bytes, from) = converse(&mut stream, &mut reader)?;
 
-    Ok(Taken::new(format!("smtp://{peer}"), bytes))
+    let taken = Taken::new(format!("smtp://{peer}"), bytes).from_peer(peer);
+    Ok(match from {
+        Some(from) => taken.observing(SMTP_MAIL_FROM, from),
+        None => taken,
+    })
 }
 
 /// Answer commands until the client leaves, the end of each `DATA` at once,
-/// and hand back what it sent last.
-fn converse(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Vec<u8>> {
+/// and hand back what it sent last, with the reverse-path it named.
+fn converse(
+    stream: &mut impl Write,
+    reader: &mut impl BufRead,
+) -> Result<(Vec<u8>, Option<String>)> {
     let mut bytes = Vec::new();
+    let mut from = None;
 
     loop {
         match command(stream, reader)? {
             Next::Continue => (),
+            Next::Mail(said) => from = Some(said),
             Next::Data(data) => {
                 bytes = data;
                 say(stream, ACCEPTED)?;
             }
-            Next::Done => return Ok(bytes),
+            Next::Done => return Ok((bytes, from)),
         }
     }
 }
@@ -82,33 +96,39 @@ fn converse(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Vec<u8
 /// Where the connection broke, or a `DATA` did not end.
 pub fn command(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<Next> {
     match next_verb(reader)? {
-        Some(verb) => answer(stream, reader, &verb),
+        Some((verb, command)) => answer(stream, reader, &verb, &command),
         None => Ok(Next::Done),
     }
 }
 
-/// The next command's verb, or `None` where the client hung up.
-fn next_verb(reader: &mut impl BufRead) -> Result<Option<String>> {
+/// The next command's verb and the command whole, or `None` where the
+/// client hung up.
+fn next_verb(reader: &mut impl BufRead) -> Result<Option<(String, String)>> {
     let Some(command) = net::read::line(reader)? else {
         return Ok(None);
     };
 
-    Ok(Some(
-        command
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase(),
-    ))
+    let verb = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    Ok(Some((verb, command)))
 }
 
 /// Answer one command.
-fn answer(stream: &mut impl Write, reader: &mut impl BufRead, verb: &str) -> Result<Next> {
+fn answer(
+    stream: &mut impl Write,
+    reader: &mut impl BufRead,
+    verb: &str,
+    command: &str,
+) -> Result<Next> {
     match verb {
         "" => Ok(Next::Continue),
         "HELO" => say(stream, "250 xmip").map(|()| Next::Continue),
         "EHLO" => say(stream, "250-xmip\r\n250 8BITMIME").map(|()| Next::Continue),
-        "MAIL" | "RCPT" | "RSET" | "NOOP" => say(stream, "250 ok").map(|()| Next::Continue),
+        "MAIL" => say(stream, "250 ok").map(|()| Next::Mail(reverse_path(command))),
+        "RCPT" | "RSET" | "NOOP" => say(stream, "250 ok").map(|()| Next::Continue),
         "DATA" => {
             say(stream, "354 end with a line containing only a period")?;
             Ok(Next::Data(read_data(reader)?))
@@ -125,13 +145,26 @@ fn answer(stream: &mut impl Write, reader: &mut impl BufRead, verb: &str) -> Res
     }
 }
 
+/// The reverse-path `MAIL FROM:<path> [parameters]` names, its angle
+/// brackets taken off: `a@example.com`, or empty for the null path `<>`.
+fn reverse_path(command: &str) -> String {
+    let after = command
+        .split_once(':')
+        .map_or("", |(_, path)| path)
+        .trim_start();
+    let path = after.split_whitespace().next().unwrap_or_default();
+    path.trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn converse_with(script: &[u8]) -> (Vec<u8>, String) {
         let mut said = Vec::new();
-        let bytes = converse(&mut said, &mut &script[..]).expect("conversing");
+        let (bytes, _) = converse(&mut said, &mut &script[..]).expect("conversing");
 
         (bytes, String::from_utf8_lossy(&said).to_string())
     }
@@ -171,12 +204,16 @@ mod tests {
     }
 
     #[test]
-    fn the_envelope_is_answered_and_not_kept() {
-        // ADR-0019: MAIL FROM is a passed identity for the identification gate,
-        // and the Stream carries origin rather than envelope.
-        let (bytes, said) = converse_with(b"MAIL FROM:<a@example.com>\r\nQUIT\r\n");
+    fn the_envelope_is_answered_and_its_sender_kept_beside_the_stream() {
+        // ADR-0019: MAIL FROM is a passed identity for the identification
+        // gate; the Stream is the content, the reverse-path travels beside it.
+        let mut said = Vec::new();
+        let script = b"MAIL FROM:<a@example.com> SIZE=12\r\nQUIT\r\n";
+        let (bytes, from) = converse(&mut said, &mut &script[..]).expect("conversing");
 
-        assert!(said.contains("250 ok"));
+        assert!(String::from_utf8_lossy(&said).contains("250 ok"));
         assert!(bytes.is_empty());
+        assert_eq!(from.as_deref(), Some("a@example.com"));
+        assert_eq!(reverse_path("MAIL FROM:<>"), "");
     }
 }
