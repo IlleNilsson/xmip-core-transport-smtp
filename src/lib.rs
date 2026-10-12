@@ -109,6 +109,10 @@ impl Transport for SmtpTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the accept waits for a client and its message")
+    }
+
     /// One message, from a new client on the listener the first receive
     /// bound and kept, or the next from a client kept connected. Its
     /// client waits for the reply to the end of its `DATA` until the
