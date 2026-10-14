@@ -212,7 +212,7 @@ mod tests {
         let (bytes, from) = converse(&mut said, &mut &script[..]).expect("conversing");
 
         assert!(String::from_utf8_lossy(&said).contains("250 ok"));
-        assert!(bytes.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
         assert_eq!(from.as_deref(), Some("a@example.com"));
         assert_eq!(reverse_path("MAIL FROM:<>"), "");
     }
