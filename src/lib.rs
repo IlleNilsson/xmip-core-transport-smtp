@@ -118,14 +118,19 @@ impl Transport for SmtpTransport {
     /// client waits for the reply to the end of its `DATA` until the
     /// verdict: `250` on `Accepted`, `451` on `Refused`
     /// ([`receiving`]).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let arrived =
             self.serving
                 .next(|| self.bind(), self.timeout, Client::greeted, Client::turn)?;
         Ok(vec![arrived])
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("the DATA block is dot-stuffed whole")
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         client::relay(&self.relay, &self.from, target, bytes, self.timeout)
     }
 }
