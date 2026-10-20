@@ -1,7 +1,7 @@
 //! Saying and hearing one line at a time.
 //!
 //! The two mistakes this exists to stop happening twice: reading a multi-line
-//! reply as one line, and getting the retryable/permanent judgement backwards.
+//! reply as one line, and getting the retryable/permanent judgment backwards.
 
 use std::io::{BufRead, Write};
 

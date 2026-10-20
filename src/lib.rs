@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mailbox_has_no_artefact_to_claim_on_the_sending_side() {
+    fn a_mailbox_has_no_artifact_to_claim_on_the_sending_side() {
         assert!(
             SmtpTransport::sending("relay:25", "x@example.com")
                 .claims()
