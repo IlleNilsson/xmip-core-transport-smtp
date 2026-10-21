@@ -1,13 +1,25 @@
-//! Relaying one message, one step at a time.
+//! Relaying messages through one server, one step at a time, on a session
+//! kept between them.
+//!
+//! A session is greeted and said `EHLO` once, when it opens, and each
+//! message after is one mail transaction on it: `MAIL FROM`, `RCPT TO`,
+//! `DATA`. A transaction that ended — the end of its `DATA` answered,
+//! whatever the answer — is followed straight by the next `MAIL FROM`, as
+//! RFC 5321 section 3.3 allows; one refused before its end is reset by
+//! `RSET` (section 4.1.1.5), so the session carries the next. The session
+//! says `QUIT` when it is let go. Until 2026-10-21 every message connected,
+//! greeted, said `EHLO` and `QUIT` of its own.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
+use std::net::TcpStream;
 use std::time::Duration;
 
-use net::authority::with_default_port;
+use transport::Pooled;
 use transport::error::{Result, classify, protocol_error};
+use transport::pool::quiet;
 use transport::socket;
 
-use super::session::{expect, read_reply, say};
+use super::session::{expect, judged, say};
 
 /// One mailbox to deliver to.
 ///
@@ -38,59 +50,94 @@ impl Recipient {
     }
 }
 
-/// Relay one message through one server, within `timeout` on the connect
-/// and on every read. `None` waits as long as the operating system does.
-///
-/// # Errors
-///
-/// Where the target is not a mailbox, the relay could not be reached within
-/// `timeout`, or any step of the exchange was refused.
-pub fn relay(
-    relay: &str,
-    from: &str,
-    target: &str,
-    bytes: &[u8],
-    timeout: Option<Duration>,
-) -> Result<()> {
-    let recipient = Recipient::parse(target)?;
-    let address = with_default_port(relay, 25);
-
-    // The connect is bounded as well as the reads. This was a bare connect
-    // until 2026-09-21, which waits on the operating system's schedule, and
-    // longer still on a machine out of ephemeral ports.
-    let mut stream = socket::connect_tcp(&address, timeout)?;
-
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| classify("cloning the connection", &e))?,
-    );
-
-    envelope(&mut stream, &mut reader, from, &recipient)?;
-    body(&mut stream, bytes)?;
-    finish(&mut stream, &mut reader)
+/// A session with one relay, greeted once and kept between messages.
+pub struct Session {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
+    /// Whether the last transaction left the session able to carry the
+    /// next: not where its `RSET` failed.
+    open: bool,
 }
 
-/// Greeting through to `DATA`: who is sending, to whom.
-fn envelope(
-    stream: &mut impl Write,
-    reader: &mut impl BufRead,
-    from: &str,
-    recipient: &Recipient,
-) -> Result<()> {
-    expect(reader, 220, "the greeting")?;
+impl Pooled for Session {
+    /// A server speaks only when asked, so anything it sent to an idle
+    /// session — a `421` before it closes — or its close lets it go.
+    fn usable(&mut self) -> bool {
+        self.open && self.reader.buffer().is_empty() && quiet(&self.writer)
+    }
+}
 
-    say(stream, "EHLO xmip")?;
-    expect(reader, 250, "EHLO")?;
+impl Session {
+    /// Connect to the relay at `address` within `timeout`, with `timeout`
+    /// on every read, and be greeted. `None` waits as long as the operating
+    /// system does.
+    ///
+    /// # Errors
+    ///
+    /// Where the relay could not be reached within `timeout`, or did not
+    /// greet or answer `EHLO`.
+    pub fn open(address: &str, timeout: Option<Duration>) -> Result<Self> {
+        // The connect is bounded as well as the reads. This was a bare
+        // connect until 2026-09-21, which waits on the operating system's
+        // schedule, and longer still on a machine out of ephemeral ports.
+        let (mut reader, mut writer) = socket::split(socket::connect_tcp(address, timeout)?)?;
+        expect(&mut reader, 220, "the greeting")?;
+        say(&mut writer, "EHLO xmip")?;
+        expect(&mut reader, 250, "EHLO")?;
+        Ok(Self {
+            reader,
+            writer,
+            open: true,
+        })
+    }
 
-    say(stream, &format!("MAIL FROM:<{from}>"))?;
-    expect(reader, 250, "MAIL FROM")?;
+    /// Relay `bytes` from `from` to `recipient` as one mail transaction:
+    /// `Ok(Ok(()))` where the server took it, `Ok(Err(refusal))` where it
+    /// answered a step with a refusal — retryable on a `4xx`, permanent on
+    /// a `5xx` — and the session is kept for the next.
+    ///
+    /// # Errors
+    ///
+    /// Where the session broke: the relay closed it or stopped answering.
+    pub fn deliver(
+        &mut self,
+        from: &str,
+        recipient: &Recipient,
+        bytes: &[u8],
+    ) -> Result<Result<()>> {
+        let steps = [
+            (format!("MAIL FROM:<{from}>"), 250, "MAIL FROM"),
+            (format!("RCPT TO:<{}>", recipient.mailbox()), 250, "RCPT TO"),
+            ("DATA".to_string(), 354, "DATA"),
+        ];
+        for (command, wanted, step) in &steps {
+            say(&mut self.writer, command)?;
+            if let Err(refused) = judged(&mut self.reader, *wanted, step)? {
+                return Ok(Err(self.reset(refused)));
+            }
+        }
+        body(&mut self.writer, bytes)?;
+        // The transaction ends here, whatever the answer: the next goes
+        // straight on with its `MAIL FROM`.
+        judged(&mut self.reader, 250, "the end of data")
+    }
 
-    say(stream, &format!("RCPT TO:<{}>", recipient.mailbox()))?;
-    expect(reader, 250, "RCPT TO")?;
+    /// `refused`, the transaction it ended reset so the session carries
+    /// the next, or let go where the reset is not answered.
+    fn reset(&mut self, refused: transport::TransportError) -> transport::TransportError {
+        self.open = say(&mut self.writer, "RSET")
+            .and_then(|()| expect(&mut self.reader, 250, "RSET"))
+            .is_ok();
+        refused
+    }
+}
 
-    say(stream, "DATA")?;
-    expect(reader, 354, "DATA")
+impl Drop for Session {
+    /// Say goodbye. The reply is not waited for: every message the session
+    /// carried was answered already, and nothing is left to report.
+    fn drop(&mut self) {
+        drop(say(&mut self.writer, "QUIT"));
+    }
 }
 
 /// The message itself as one dot-stuffed block, bytes as they are, the
@@ -99,19 +146,6 @@ fn body(stream: &mut impl Write, bytes: &[u8]) -> Result<()> {
     stream
         .write_all(&transport::stuffed::stuff(bytes))
         .map_err(|e| classify("writing the message data", &e))
-}
-
-/// Wait for the acknowledgement of the data, say goodbye.
-fn finish(stream: &mut impl Write, reader: &mut impl BufRead) -> Result<()> {
-    expect(reader, 250, "the end of data")?;
-    say(stream, "QUIT")?;
-
-    // Wait for the goodbye before dropping the connection. Without this the
-    // server is still writing 221 when the socket closes under it, and a
-    // delivery that fully succeeded is reported as a broken pipe.
-    let _ = read_reply(reader);
-
-    Ok(())
 }
 
 #[cfg(test)]
