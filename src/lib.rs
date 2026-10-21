@@ -10,8 +10,14 @@
 //! session.rs    saying and hearing one line at a time
 //! server.rs     answering a client's commands
 //! receiving.rs  a Receive Location's clients, answered after the cycle
-//! client.rs     relaying one message
+//! client.rs     relaying messages on a session kept with the relay
 //! ```
+//!
+//! **Both ends keep the session.** A Receive Location keeps its clients'
+//! connections ([`receiving`]); a Send Location keeps its session with the
+//! relay in the capability's pool (`transport::Pool`), one mail transaction
+//! a message ([`client::Session`]). Until 2026-10-21 every message sent
+//! connected, greeted and said `QUIT` of its own.
 //!
 //! **A message is taken only after the runtime's whole receive cycle.** The
 //! client waits for the reply to the end of its `DATA`: `250` on
@@ -27,10 +33,12 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use context::property::{PEER_ADDRESS, SMTP_MAIL_FROM};
+use net::authority::with_default_port;
 use transport::ArrivalIdentity;
 use transport::Arrived;
 use transport::Configured;
 use transport::Directions;
+use transport::Pool;
 use transport::Transport;
 use transport::error::Result;
 use transport::listening::Listening;
@@ -39,6 +47,7 @@ use transport::serving::Serving;
 use transport::socket;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
+use crate::client::{Recipient, Session};
 use crate::receiving::Client;
 
 pub struct SmtpTransport {
@@ -49,6 +58,8 @@ pub struct SmtpTransport {
     /// The listener the first receive binds, and the clients' connections
     /// kept open on it between messages.
     serving: Serving<Client>,
+    /// The session kept with the relay between messages.
+    sessions: Pool<Session>,
 }
 
 impl SmtpTransport {
@@ -61,6 +72,7 @@ impl SmtpTransport {
             from: String::new(),
             timeout: None,
             serving: Serving::new(),
+            sessions: Pool::new(),
         }
     }
 
@@ -73,6 +85,7 @@ impl SmtpTransport {
             from: from.into(),
             timeout: None,
             serving: Serving::new(),
+            sessions: Pool::new(),
         }
     }
 
@@ -105,7 +118,8 @@ impl Transport for SmtpTransport {
 
     fn arrivals(&self) -> transport::Arrivals {
         transport::Arrivals::Unordered(
-            "each request is its own, and a connection waiting for its answer takes no next request",
+            "each request is its own, and a connection waiting for its answer takes no next \
+             request",
         )
     }
 
@@ -129,9 +143,18 @@ impl Transport for SmtpTransport {
         transport::Sending::Gathered("the DATA block is dot-stuffed whole")
     }
 
+    /// One mail transaction on the session kept with the relay, or a new
+    /// one greeted for it. A refusal the relay answered fails the send —
+    /// retryable on a `4xx`, permanent on a `5xx` — and keeps the session.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
-        client::relay(&self.relay, &self.from, target, bytes, self.timeout)
+        let recipient = Recipient::parse(target)?;
+        let address = with_default_port(&self.relay, 25);
+        self.sessions.exchange(
+            address.as_str(),
+            || Session::open(&address, self.timeout),
+            |session| session.deliver(&self.from, &recipient, bytes),
+        )?
     }
 }
 
@@ -294,6 +317,102 @@ mod tests {
         let refused = refused.expect_err("a 554");
         assert!(!refused.retryable, "a 554 is permanent: {refused}");
         assert!(refused.message.contains("554"), "{refused}");
+    }
+
+    #[test]
+    fn a_hundred_messages_through_one_relay_are_one_session_and_every_receive_takes_from_it() {
+        // Until 2026-10-21 every message connected, greeted, said EHLO and
+        // QUIT of its own.
+        const ROUNDS: usize = 100;
+        let receiver = SmtpTransport::loopback();
+        let address = receiver
+            .serving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        let sender = std::thread::spawn(move || {
+            let sending = SmtpTransport::sending(address, "xmip@example.com")
+                .timing_out_after(LOOPBACK_TIMEOUT);
+            for round in 0..ROUNDS {
+                let body = format!("Subject: {round}");
+                sending
+                    .send("mailto:a@example.com", body.as_bytes())
+                    .expect("a 250");
+            }
+            sending.sessions.opened()
+        });
+        let mut origins = std::collections::BTreeSet::new();
+        for round in 0..ROUNDS {
+            let arrived =
+                transport::arrived::one_arrival(receiver.receive().expect("received"), "one")
+                    .expect("one");
+            let taken = arrived.taken().expect("accepted");
+            assert_eq!(taken.bytes, format!("Subject: {round}").as_bytes());
+            origins.insert(taken.origin_uri);
+        }
+        assert_eq!(sender.join().expect("sender"), 1, "one session");
+        assert_eq!(origins.len(), 1, "every message on the kept connection");
+        assert_eq!(receiver.serving.open(), 1);
+    }
+
+    #[test]
+    fn a_transaction_refused_before_its_end_is_reset_and_the_session_carries_the_next() {
+        use std::io::{BufRead, Write};
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bound");
+        // A relay that refuses the first recipient: what it hears, in order.
+        let relay = std::thread::spawn(move || {
+            let (stream, _) = socket::accept_tcp(&listener, Some(LOOPBACK_TIMEOUT)).expect("in");
+            let (mut reader, mut writer) = socket::split(stream).expect("split");
+            let mut heard = Vec::new();
+            writer.write_all(b"220 relay\r\n").expect("greeted");
+            for answer in [
+                "250 relay",
+                "250 ok",
+                "550 no such user",
+                "250 reset",
+                "250 ok",
+            ]
+            .into_iter()
+            .chain(["250 ok", "354 go on"])
+            {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("a command");
+                heard.push(
+                    line.split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                writer
+                    .write_all(format!("{answer}\r\n").as_bytes())
+                    .expect("answered");
+            }
+            let data = session::read_data(&mut reader).expect("the data");
+            writer.write_all(b"250 taken\r\n").expect("taken");
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("goodbye");
+            heard.push(line.trim_end().to_string());
+            (heard, data)
+        });
+        let sending =
+            SmtpTransport::sending(address, "xmip@example.com").timing_out_after(LOOPBACK_TIMEOUT);
+        let refused = sending
+            .send("mailto:nobody@example.com", b"first")
+            .expect_err("a 550");
+        assert!(!refused.retryable, "{refused}");
+        sending
+            .send("mailto:a@example.com", b"second")
+            .expect("a 250");
+        assert_eq!(sending.sessions.opened(), 1);
+        drop(sending);
+        let (heard, data) = relay.join().expect("relay");
+        assert_eq!(
+            heard,
+            [
+                "EHLO", "MAIL", "RCPT", "RSET", "MAIL", "RCPT", "DATA", "QUIT"
+            ]
+        );
+        assert_eq!(data, b"second");
     }
 
     #[test]

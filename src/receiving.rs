@@ -121,7 +121,7 @@ impl Open for Client {
         !self.reader.buffer().is_empty()
     }
 
-    fn busy(&self) -> bool {
-        self.busy.is_busy()
+    fn busy(&self) -> Option<&Busy> {
+        Some(&self.busy)
     }
 }

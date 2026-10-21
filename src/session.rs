@@ -61,16 +61,28 @@ pub fn read_reply(reader: &mut impl BufRead) -> Result<(u16, String)> {
 /// Where the server answered anything else. **SMTP runs the opposite way round
 /// from HTTP**: 4xx is the transient failure and 5xx is the permanent one.
 pub fn expect(reader: &mut impl BufRead, wanted: u16, step: &str) -> Result<()> {
+    judged(reader, wanted, step)?
+}
+
+/// Read one reply and judge it: `Ok(Ok(()))` where the server answered
+/// `wanted`, `Ok(Err(refusal))` where it answered anything else — the
+/// session goes on, its transaction reset — and `Err` only where no reply
+/// could be read, the session broken.
+///
+/// # Errors
+///
+/// Where the connection closed mid-reply, or a line carried no reply code.
+pub fn judged(reader: &mut impl BufRead, wanted: u16, step: &str) -> Result<Result<()>> {
     let (code, text) = read_reply(reader)?;
 
     if code == wanted {
-        return Ok(());
+        return Ok(Ok(()));
     }
 
-    Err(TransportError {
+    Ok(Err(TransportError {
         message: format!("{step}: the server answered {text}"),
         retryable: (400..500).contains(&code),
-    })
+    }))
 }
 
 /// Read a DATA payload: the dot-stuffed block up to its terminator, bytes as
