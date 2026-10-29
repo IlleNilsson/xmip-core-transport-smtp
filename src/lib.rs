@@ -183,6 +183,9 @@ impl Configured for SmtpTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["smtp"];
+
     /// A Send Location is the one with a sender, which its declaration makes
     /// required there and refuses on a Receive Location.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
