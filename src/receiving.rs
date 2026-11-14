@@ -14,7 +14,8 @@ use std::io::BufReader;
 use std::net::{SocketAddr, TcpStream};
 
 use transport::answer::{Answer, Busy};
-use transport::error::{Result, classify};
+use transport::deadline::Within;
+use transport::error::Result;
 use transport::serving::{Open, Turn};
 use transport::{Acknowledgement, Arrived, Refusal, Verdict};
 
@@ -45,9 +46,10 @@ pub const fn reply(verdict: Verdict) -> &'static str {
     }
 }
 
-/// One client's connection, kept between its messages.
+/// One client's connection, kept between its messages, each read within
+/// its turn.
 pub struct Client {
-    reader: BufReader<TcpStream>,
+    reader: BufReader<Within>,
     writer: TcpStream,
     peer: SocketAddr,
     /// The reverse-path the last `MAIL FROM` named, for the message whose
@@ -62,15 +64,11 @@ impl Client {
     ///
     /// # Errors
     /// Where the greeting could not be written.
-    pub fn greeted(stream: TcpStream, peer: SocketAddr) -> Result<Self> {
-        let reader = BufReader::new(
-            stream
-                .try_clone()
-                .map_err(|e| classify("cloning the connection", &e))?,
-        );
+    pub fn greeted(stream: Within, peer: SocketAddr) -> Result<Self> {
+        let (reader, writer) = stream.split()?;
         let mut client = Self {
             reader,
-            writer: stream,
+            writer,
             peer,
             from: None,
             busy: Busy::new(),
