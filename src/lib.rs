@@ -203,6 +203,13 @@ impl Configured for SmtpTransport {
             None => transport,
         })
     }
+
+    /// Each client's turn on a Receive Location taking at most `turn`: one
+    /// command, or one message's `DATA` to its end.
+    fn turning_within(mut self, turn: Duration) -> Self {
+        self.serving = self.serving.turning_within(turn);
+        self
+    }
 }
 
 impl SmtpTransport {
