@@ -89,14 +89,6 @@ impl SmtpTransport {
         }
     }
 
-    /// Give up on a connection that does not arrive, or stops sending, as
-    /// `TcpTransport` does.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind and report the address actually assigned.
     ///
     /// # Errors
@@ -177,30 +169,28 @@ impl Configured for SmtpTransport {
                 meaning: "The mailbox a Send Location's mail is from.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a connection is waited for, and how long one that stops \
-                          sending is waited on; unbounded when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a connection is waited for, and how long one that stops \
+                 sending is waited on; unbounded when left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["smtp"];
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
     /// A Send Location is the one with a sender, which its declaration makes
     /// required there and refuses on a Receive Location.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        let transport = match settings.optional_text("from") {
+        Ok(match settings.optional_text("from") {
             Some(from) => Self::sending(address, from),
             None => Self::receiving(address),
-        };
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
         })
     }
 
