@@ -200,6 +200,12 @@ impl Configured for SmtpTransport {
         self.serving = self.serving.turning_within(turn);
         self
     }
+
+    /// Each callers turn on a Receive Location counted on clock.
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.serving = self.serving.timed_by(clock);
+        self
+    }
 }
 
 impl SmtpTransport {
