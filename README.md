@@ -14,7 +14,7 @@ Each command and reply line is read there too (`net::read::line`, under its
 ceiling, refused where it is not UTF-8), and a reply's code (`net::reply`);
 until 2026-09-27 this crate read both itself, the code without its range.
 
-A Receive Location keeps its listener, bound on the first receive: a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused. Since 2026-10-02 a client's connection is kept too (`transport::serving::Serving`), so a client that sends several messages in one session has each taken by a receive.
+A Receive Location keeps its listener, bound as its transport is opened (`Configured::listening`; on its first receive until 2026-11-16): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused. Since 2026-10-02 a client's connection is kept too (`transport::serving::Serving`), so a client that sends several messages in one session has each taken by a receive.
 
 A Send Location keeps its session with the relay (`transport::Pool`, `client::Session`): greeted and `EHLO` once, then one mail transaction a message. A transaction whose `DATA` was answered, whatever the answer, is followed straight by the next `MAIL FROM` (RFC 5321 section 3.3); one refused before its end is reset with `RSET` (section 4.1.1.5), so the session carries the next; the session says `QUIT` when it is let go. Until 2026-10-21 every message connected, greeted, said `EHLO` and `QUIT` of its own.
 
