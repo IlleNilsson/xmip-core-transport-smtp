@@ -55,7 +55,7 @@ pub struct SmtpTransport {
     relay: String,
     from: String,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and the clients' connections
+    /// The listener its open binds, and the clients' connections
     /// kept open on it between messages.
     serving: Serving<Client>,
     /// The session kept with the relay between messages.
@@ -124,15 +124,15 @@ impl Transport for SmtpTransport {
         transport::Waiting::Waits("the accept waits for a client and its message")
     }
 
-    /// One message, from a new client on the listener the first receive
+    /// One message, from a new client on the listener its open
     /// bound and kept, or the next from a client kept connected. Its
     /// client waits for the reply to the end of its `DATA` until the
     /// verdict: `250` on `Accepted`, `451` on `Refused`
     /// ([`receiving`]).
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let arrived =
-            self.serving
-                .next(|| self.bind(), self.timeout, Client::greeted, Client::turn)?;
+        let arrived = self
+            .serving
+            .next(self.timeout, Client::greeted, Client::turn)?;
         Ok(vec![arrived])
     }
 
@@ -205,6 +205,12 @@ impl Configured for SmtpTransport {
     fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
         self.serving = self.serving.timed_by(clock);
         self
+    }
+
+    /// The listener every receive takes from, bound where a Receive
+    /// Location listens for clients.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.serving.bound(|| self.bind()).map(Some)
     }
 }
 
