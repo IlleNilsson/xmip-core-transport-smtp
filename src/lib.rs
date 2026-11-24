@@ -3,8 +3,10 @@
 //! Streams that arrive as mail. One message body is one Stream.
 //!
 //! **The envelope is addressing, not content.** The recipient is Send Location
-//! configuration and the relay is where Xmip hands the message over. That split
-//! is why `send` takes a mailbox as its target and not a host.
+//! configuration, its `to`, and the relay is where Xmip hands the message
+//! over, its address. That split is why a send's target is a mailbox and not
+//! a host: the Location's own target names none (`transport::destination`),
+//! and its `to` is the mailbox; a target naming another still wins.
 //!
 //! ```text
 //! session.rs    saying and hearing one line at a time
@@ -40,6 +42,7 @@ use transport::Configured;
 use transport::Directions;
 use transport::Pool;
 use transport::Transport;
+use transport::destination;
 use transport::error::Result;
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -54,6 +57,9 @@ pub struct SmtpTransport {
     bind: String,
     relay: String,
     from: String,
+    /// The mailbox a send goes to where its target names none: a Send
+    /// Location's `to`.
+    to: String,
     timeout: Option<Duration>,
     /// The listener its open binds, and the clients' connections
     /// kept open on it between messages.
@@ -70,6 +76,7 @@ impl SmtpTransport {
             bind: bind.into(),
             relay: String::new(),
             from: String::new(),
+            to: String::new(),
             timeout: None,
             serving: Serving::new(),
             sessions: Pool::new(),
@@ -83,10 +90,19 @@ impl SmtpTransport {
             bind: String::new(),
             relay: relay.into(),
             from: from.into(),
+            to: String::new(),
             timeout: None,
             serving: Serving::new(),
             sessions: Pool::new(),
         }
+    }
+
+    /// This sender's mail going to `mailbox` where a send names none, as a
+    /// Send Location's `to` says (`transport::destination`).
+    #[must_use]
+    pub fn addressed_to(mut self, mailbox: impl Into<String>) -> Self {
+        self.to = mailbox.into();
+        self
     }
 
     /// Bind and report the address actually assigned.
@@ -141,11 +157,13 @@ impl Transport for SmtpTransport {
     }
 
     /// One mail transaction on the session kept with the relay, or a new
-    /// one greeted for it. A refusal the relay answered fails the send —
-    /// retryable on a `4xx`, permanent on a `5xx` — and keeps the session.
+    /// one greeted for it, to the mailbox `target` names, or the Location's
+    /// `to` where it names none. A refusal the relay answered fails the
+    /// send — retryable on a `4xx`, permanent on a `5xx` — and keeps the
+    /// session.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
-        let recipient = Recipient::parse(target)?;
+        let recipient = Recipient::parse(destination::named(target).unwrap_or(&self.to))?;
         let address = with_default_port(&self.relay, 25);
         self.sessions.exchange(
             address.as_str(),
@@ -169,6 +187,13 @@ impl Configured for SmtpTransport {
                 meaning: "The mailbox a Send Location's mail is from.",
                 applies: Applies::Send,
             },
+            Setting {
+                name: "to",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The mailbox a Send Location's mail is sent to.",
+                applies: Applies::Send,
+            },
             transport::configured::timeout(
                 Applies::Both,
                 None,
@@ -181,6 +206,12 @@ impl Configured for SmtpTransport {
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["smtp"];
 
+    /// The `to` setting: a Send Location's mail goes to the mailbox it
+    /// names, through the relay its address names (`transport::destination`).
+    fn own_target(_address: &str) -> &str {
+        destination::OWN
+    }
+
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
     }
@@ -189,7 +220,7 @@ impl Configured for SmtpTransport {
     /// required there and refuses on a Receive Location.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         Ok(match settings.optional_text("from") {
-            Some(from) => Self::sending(address, from),
+            Some(from) => Self::sending(address, from).addressed_to(settings.text("to")),
             None => Self::receiving(address),
         })
     }
@@ -261,12 +292,20 @@ mod tests {
                 "from".to_string(),
                 Given::Text("xmip@example.com".to_string()),
             ),
+            (
+                "to".to_string(),
+                Given::Text("orders@example.com".to_string()),
+            ),
             ("timeout".to_string(), Given::Text("2s".to_string())),
         ];
         let sending = SmtpTransport::open("relay:25", Applies::Send, &given).expect("sending");
         assert_eq!(
-            (sending.relay.as_str(), sending.from.as_str()),
-            ("relay:25", "xmip@example.com")
+            (
+                sending.relay.as_str(),
+                sending.from.as_str(),
+                sending.to.as_str()
+            ),
+            ("relay:25", "xmip@example.com", "orders@example.com")
         );
         assert_eq!(sending.timeout, Some(Duration::from_secs(2)));
         let receiving =
@@ -276,6 +315,33 @@ mod tests {
             panic!("a Send Location's sender is required");
         };
         assert!(refused.message.contains("\"from\""), "{refused}");
+    }
+
+    /// A Send Location as a node builds it, from its address and settings,
+    /// sends where the node sends it: its own target, the mailbox its `to`
+    /// names (the owner, 2026-11-24: *go through each item and sort it*).
+    /// Until 2026-11-24 its target was the relay's address, and every send
+    /// was refused as no mailbox.
+    #[test]
+    fn a_send_location_sends_to_the_mailbox_its_to_names() {
+        use xcore::settings::Given;
+        let far = SmtpTransport::loopback().far_end().expect("a far end");
+        let address = format!("smtp://{}", far.address());
+        let given = [("from", "xmip@example.com"), ("to", "orders@example.com")]
+            .map(|(name, value)| (name.to_string(), Given::Text(value.to_string())));
+        let sending = SmtpTransport::open(&address, Applies::Send, &given)
+            .expect("sending")
+            .timing_out_after(LOOPBACK_TIMEOUT);
+        let taking = std::thread::spawn(move || far.take_one());
+
+        let sent = sending.send(SmtpTransport::own_target(&address), b"Subject: order");
+        // The far end hands its message over at the session's QUIT, which
+        // the kept session says as it is let go.
+        drop(sending);
+
+        let taken = taking.join().expect("the far end");
+        sent.expect("sent to the mailbox its to names");
+        assert_eq!(taken.expect("taken").bytes, b"Subject: order");
     }
 
     #[test]
