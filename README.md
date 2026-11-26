@@ -22,6 +22,10 @@ A Send Location keeps its session with the relay (`transport::Pool`, `client::Se
 
 A message is taken only after the runtime's whole receive cycle. The client waits for the reply to the end of its `DATA`, and its connection takes no next command meanwhile: `Accepted` answers `250`. `Refused` answers a permanent reply the client does not retry, among those RFC 5321 section 4.3.2 allows after `DATA`: `550 5.7.1` (RFC 3463, delivery not authorized) for a sender not identified or not permitted, `554 5.6.0` for content refused. `Failed` answers `451` — a temporary failure, RFC 5321 section 4.2.5, so the client keeps the message and sends it again (`receiving::reply`). A message dropped without a verdict shuts the connection unanswered (`transport::answer::Answer`), which a client also retries. `DATA` is read whole, dot-unstuffed by `transport::stuffed`, so the body is whole in memory. Until 2026-10-02 the end of `DATA` was answered `250` as soon as it was read.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `from`, `to` and `timeout`, and `SCHEMES`, `smtp`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on are behind the default feature. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check an SMTP Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

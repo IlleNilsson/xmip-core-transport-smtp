@@ -25,34 +25,53 @@
 //! client waits for the reply to the end of its `DATA`: `250` on
 //! `Accepted`, `451` on `Refused` — a temporary failure, so it keeps the
 //! message and sends it again.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod receiving;
+#[cfg(feature = "default")]
 pub mod server;
+#[cfg(feature = "default")]
 pub mod session;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 use context::property::{PEER_ADDRESS, SMTP_MAIL_FROM};
+#[cfg(feature = "default")]
 use net::authority::with_default_port;
-use transport::ArrivalIdentity;
-use transport::Arrived;
-use transport::Configured;
-use transport::Directions;
-use transport::Pool;
-use transport::Transport;
-use transport::destination;
+#[cfg(feature = "default")]
 use transport::error::Result;
+#[cfg(feature = "default")]
 use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::serving::Serving;
-use transport::socket;
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, Arrived, Configured, Directions, Pool, Transport};
+#[cfg(feature = "default")]
+use transport::{destination, socket};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 use crate::client::{Recipient, Session};
+#[cfg(feature = "default")]
 use crate::receiving::Client;
 
+#[cfg(feature = "default")]
 pub struct SmtpTransport {
     bind: String,
     relay: String,
@@ -68,6 +87,7 @@ pub struct SmtpTransport {
     sessions: Pool<Session>,
 }
 
+#[cfg(feature = "default")]
 impl SmtpTransport {
     /// A receiving transport. There is nothing to relay through.
     #[must_use]
@@ -115,6 +135,7 @@ impl SmtpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for SmtpTransport {
     fn name(&self) -> &'static str {
         "smtp"
@@ -173,38 +194,10 @@ impl Transport for SmtpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for SmtpTransport {
-    /// The address is where a Receive Location listens, and the relay a Send
-    /// Location hands its mail to; a send's target is the recipient's
-    /// mailbox.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "from",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The mailbox a Send Location's mail is from.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "to",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The mailbox a Send Location's mail is sent to.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a connection is waited for, and how long one that stops \
-                 sending is waited on; unbounded when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["smtp"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The `to` setting: a Send Location's mail goes to the mailbox it
     /// names, through the relay its address names (`transport::destination`).
@@ -245,6 +238,7 @@ impl Configured for SmtpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl SmtpTransport {
     /// Both ends on this machine: a receiver on an ephemeral local port, and
     /// a sender relaying one message through it, the loopback timeout on
@@ -256,6 +250,7 @@ impl SmtpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for SmtpTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Named(&[PEER_ADDRESS, SMTP_MAIL_FROM])
@@ -282,6 +277,7 @@ impl Loopback for SmtpTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+    use xcore::settings::Applies;
 
     #[test]
     fn smtp_declares_its_settings_and_reads_through_them() {
